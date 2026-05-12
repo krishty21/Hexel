@@ -32,6 +32,21 @@ type Crop = {
   size: number;
 };
 
+type DragState =
+  | {
+      mode: 'move';
+      pointerId: number;
+      offsetX: number;
+      offsetY: number;
+    }
+  | {
+      mode: 'resize';
+      pointerId: number;
+      anchorX: number;
+      anchorY: number;
+    }
+  | null;
+
 export function ImageImportModal({ file, onClose }: { file: File; onClose: () => void }) {
   const setImageGrid = useStore((state) => state.setImageGrid);
   const stopCanvasEvent = (event: React.SyntheticEvent) => {
@@ -39,7 +54,7 @@ export function ImageImportModal({ file, onClose }: { file: File; onClose: () =>
   };
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [crop, setCrop] = useState<Crop>({ x: 0, y: 0, size: 1 });
-  const [dragging, setDragging] = useState(false);
+  const [dragState, setDragState] = useState<DragState>(null);
   const previewRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -61,18 +76,56 @@ export function ImageImportModal({ file, onClose }: { file: File; onClose: () =>
   const needsCrop = image ? image.naturalWidth > 720 || image.naturalHeight > 720 || image.naturalWidth !== image.naturalHeight : false;
   const imageUrl = useMemo(() => (image ? image.src : ''), [image]);
 
-  const moveCrop = (clientX: number, clientY: number) => {
-    if (!image || !previewRef.current) return;
+  const getImagePoint = (clientX: number, clientY: number) => {
+    if (!image || !previewRef.current) return null;
     const rect = previewRef.current.getBoundingClientRect();
     const px = (clientX - rect.left) / rect.width;
     const py = (clientY - rect.top) / rect.height;
-    const nextX = px * image.naturalWidth - crop.size / 2;
-    const nextY = py * image.naturalHeight - crop.size / 2;
-    setCrop((current) => ({
-      ...current,
-      x: Math.max(0, Math.min(image.naturalWidth - current.size, nextX)),
-      y: Math.max(0, Math.min(image.naturalHeight - current.size, nextY))
-    }));
+    return {
+      x: Math.max(0, Math.min(image.naturalWidth, px * image.naturalWidth)),
+      y: Math.max(0, Math.min(image.naturalHeight, py * image.naturalHeight)),
+    };
+  };
+
+  const clampCrop = (next: Crop) => {
+    if (!image) return next;
+    const maxSize = Math.min(image.naturalWidth, image.naturalHeight);
+    const size = Math.max(64, Math.min(maxSize, next.size));
+    return {
+      size,
+      x: Math.max(0, Math.min(image.naturalWidth - size, next.x)),
+      y: Math.max(0, Math.min(image.naturalHeight - size, next.y)),
+    };
+  };
+
+  const updateCropFromPointer = (clientX: number, clientY: number) => {
+    if (!image || !dragState) return;
+    const point = getImagePoint(clientX, clientY);
+    if (!point) return;
+
+    if (dragState.mode === 'move') {
+      setCrop((current) =>
+        clampCrop({
+          ...current,
+          x: point.x - dragState.offsetX,
+          y: point.y - dragState.offsetY,
+        }),
+      );
+      return;
+    }
+
+    setCrop(() => {
+      const size = Math.max(
+        64,
+        Math.max(
+          Math.abs(point.x - dragState.anchorX),
+          Math.abs(point.y - dragState.anchorY),
+        ),
+      );
+      const nextX = Math.min(dragState.anchorX, point.x);
+      const nextY = Math.min(dragState.anchorY, point.y);
+      return clampCrop({ x: nextX, y: nextY, size });
+    });
   };
 
   const applyImage = () => {
@@ -142,6 +195,12 @@ export function ImageImportModal({ file, onClose }: { file: File; onClose: () =>
     height: `${(crop.size / image.naturalHeight) * 100}%`
   };
 
+  const previewSelectionStyle = {
+    backgroundImage: `url(${imageUrl})`,
+    backgroundSize: `${(image.naturalWidth / crop.size) * 100}% ${(image.naturalHeight / crop.size) * 100}%`,
+    backgroundPosition: `${(crop.x / Math.max(1, image.naturalWidth - crop.size)) * 100}% ${(crop.y / Math.max(1, image.naturalHeight - crop.size)) * 100}%`,
+  };
+
   return (
     <div className="absolute inset-0 z-[80] flex items-center justify-center bg-black/82 p-6 backdrop-blur-md">
       <div
@@ -167,43 +226,105 @@ export function ImageImportModal({ file, onClose }: { file: File; onClose: () =>
             ref={previewRef}
             className="relative mx-auto overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900"
             style={{ width: previewWidth, maxWidth: '100%', height: previewHeight }}
-            onPointerDown={(event) => {
-              if (!needsCrop) return;
-              setDragging(true);
-              moveCrop(event.clientX, event.clientY);
-            }}
             onPointerMove={(event) => {
-              if (dragging) moveCrop(event.clientX, event.clientY);
+              if (dragState?.pointerId === event.pointerId) updateCropFromPointer(event.clientX, event.clientY);
             }}
-            onPointerUp={() => setDragging(false)}
-            onPointerLeave={() => setDragging(false)}
+            onPointerUp={(event) => {
+              if (dragState?.pointerId === event.pointerId) setDragState(null);
+            }}
+            onPointerLeave={(event) => {
+              if (dragState?.pointerId === event.pointerId) setDragState(null);
+            }}
           >
             <img src={imageUrl} alt="" className="h-full w-full object-fill" draggable={false} />
             {needsCrop && (
-              <div className="absolute border-2 border-cyan-300 bg-cyan-300/10 shadow-[0_0_30px_rgba(103,232,249,0.35)]" style={cropStyle} />
+              <>
+                <div className="pointer-events-none absolute inset-0 bg-black/45" />
+                <div
+                  className="absolute cursor-move border-2 border-cyan-300 bg-cyan-300/10 shadow-[0_0_30px_rgba(103,232,249,0.35)]"
+                  style={cropStyle}
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    const point = getImagePoint(event.clientX, event.clientY);
+                    if (!point) return;
+                    setDragState({
+                      mode: 'move',
+                      pointerId: event.pointerId,
+                      offsetX: point.x - crop.x,
+                      offsetY: point.y - crop.y,
+                    });
+                    event.currentTarget.setPointerCapture(event.pointerId);
+                  }}
+                >
+                  <div className="absolute inset-0 border border-white/35" />
+                  <div className="absolute left-1/2 top-1/2 h-10 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/35" />
+                  {(['tl', 'tr', 'bl', 'br'] as const).map((corner) => {
+                    const isRight = corner.includes('r');
+                    const isBottom = corner.includes('b');
+                    const anchorX = isRight ? crop.x : crop.x + crop.size;
+                    const anchorY = isBottom ? crop.y : crop.y + crop.size;
+                    return (
+                      <button
+                        key={corner}
+                        type="button"
+                        className={`absolute h-4 w-4 rounded-full border border-cyan-200 bg-cyan-300 shadow ${
+                          isRight ? '-right-2' : '-left-2'
+                        } ${isBottom ? '-bottom-2' : '-top-2'}`}
+                        onPointerDown={(event) => {
+                          event.stopPropagation();
+                          setDragState({
+                            mode: 'resize',
+                            pointerId: event.pointerId,
+                            anchorX,
+                            anchorY,
+                          });
+                          event.currentTarget.setPointerCapture(event.pointerId);
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+              </>
             )}
           </div>
 
           <div className="flex flex-col justify-between gap-4">
             {needsCrop && (
-              <label className="grid gap-2 text-sm text-zinc-300">
-                Region size
-                <input
-                  type="range"
-                  min={Math.max(64, Math.min(image.naturalWidth, image.naturalHeight) * 0.2)}
-                  max={Math.min(image.naturalWidth, image.naturalHeight)}
-                  value={crop.size}
-                  onChange={(event) => {
-                    const size = Number(event.target.value);
-                    setCrop((current) => ({
-                      size,
-                      x: Math.max(0, Math.min(image.naturalWidth - size, current.x)),
-                      y: Math.max(0, Math.min(image.naturalHeight - size, current.y))
-                    }));
-                  }}
-                  className="accent-cyan-300"
-                />
-              </label>
+              <>
+                <div className="grid gap-2">
+                  <span className="text-sm text-zinc-300">Selected region</span>
+                  <div
+                    className="aspect-square w-full rounded-xl border border-zinc-800 bg-zinc-900 bg-cover bg-no-repeat shadow-inner"
+                    style={previewSelectionStyle}
+                  />
+                </div>
+                <label className="grid gap-2 text-sm text-zinc-300">
+                  Region size
+                  <input
+                    type="range"
+                    min={Math.max(64, Math.min(image.naturalWidth, image.naturalHeight) * 0.18)}
+                    max={Math.min(image.naturalWidth, image.naturalHeight)}
+                    value={crop.size}
+                    onChange={(event) => {
+                      const size = Number(event.target.value);
+                      setCrop((current) =>
+                        clampCrop({
+                          size,
+                          x: current.x,
+                          y: current.y,
+                        }),
+                      );
+                    }}
+                    className="accent-cyan-300"
+                  />
+                </label>
+                <div className="grid grid-cols-2 gap-2 text-xs text-zinc-400">
+                  <div className="rounded-lg bg-zinc-900 px-3 py-2">X: {Math.round(crop.x)} px</div>
+                  <div className="rounded-lg bg-zinc-900 px-3 py-2">Y: {Math.round(crop.y)} px</div>
+                  <div className="rounded-lg bg-zinc-900 px-3 py-2">Size: {Math.round(crop.size)} px</div>
+                  <div className="rounded-lg bg-zinc-900 px-3 py-2">Output: {OUTPUT_HEX_RADIUS * 2 + 1} hex span</div>
+                </div>
+              </>
             )}
 
             <div className="rounded-xl bg-zinc-900 p-3 text-xs text-zinc-400">

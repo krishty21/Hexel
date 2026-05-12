@@ -78,6 +78,11 @@ type BeatWave = {
   radiusSpeed: number;
 };
 
+type AudioRotationBurst = {
+  until: number;
+  step: number;
+};
+
 function axialToPixel(q: number, r: number) {
   return {
     x: HEX_SIZE * Math.sqrt(3) * (q + r / 2),
@@ -199,6 +204,8 @@ export function HexCanvas({ audioAnalyser }: { audioAnalyser?: AnalyserNode }) {
   const beatWaves = useRef<BeatWave[]>([]);
   const isRightPointerDown = useRef(false);
   const lastRightPaint = useRef(0);
+  const audioRotationBurst = useRef<AudioRotationBurst | null>(null);
+  const lastAudioRotation = useRef(0);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -260,6 +267,13 @@ export function HexCanvas({ audioAnalyser }: { audioAnalyser?: AnalyserNode }) {
           lastRightPaint.current = time;
         }
       }
+      if (activeMode === 'audio' && audioRotationBurst.current) {
+        if (time < audioRotationBurst.current.until) {
+          viewAngleTarget.current += audioRotationBurst.current.step;
+        } else {
+          audioRotationBurst.current = null;
+        }
+      }
 
       const bg = ctx.createRadialGradient(width / 2, height / 2, 0, width / 2, height / 2, Math.max(width, height));
       bg.addColorStop(0, '#0b0f13');
@@ -298,12 +312,32 @@ export function HexCanvas({ audioAnalyser }: { audioAnalyser?: AnalyserNode }) {
         const lastBeat = beatWaves.current[beatWaves.current.length - 1];
 
         if (energy > 82 && energy > threshold && energy - previousAudioEnergy.current > 16 && (!lastBeat || time - lastBeat.startTime > 170)) {
+          const strength = Math.min(1.5, energy / 175);
           beatWaves.current.push({
             startTime: time,
-            strength: Math.min(1.5, energy / 175),
+            strength,
             hue: (time * 0.07 + low * 1.4 + mid * 0.55) % 360,
             radiusSpeed: 0.34 + Math.min(0.2, low / 900),
           });
+
+          const sinceRotation = time - lastAudioRotation.current;
+          const shouldRotate =
+            sinceRotation > 720 &&
+            (strength > 1.16 || low > 168 || (strength > 0.92 && Math.random() > 0.58));
+
+          if (shouldRotate) {
+            const direction = Math.random() > 0.5 ? 1 : -1;
+            const shouldFullSpin = strength > 1.22 && low > 182 && Math.random() > 0.42;
+            const totalTurn = shouldFullSpin ? Math.PI * 2 : Math.PI / 2;
+            const duration = shouldFullSpin ? 1180 : 620;
+            const frames = Math.max(10, Math.round(duration / 16));
+
+            audioRotationBurst.current = {
+              until: time + duration,
+              step: (totalTurn / frames) * direction,
+            };
+            lastAudioRotation.current = time;
+          }
         }
         previousAudioEnergy.current = energy;
       }
